@@ -1,0 +1,656 @@
+# -*- coding: utf-8 -*-
+"""
+ENPH479 Simple Harmonic Oscillators and Planar Three-Body Dynamics
+Last Modified: Feb 06 2022
+@author: Andrew Hayman
+
+This program examines systems of differential equations with simple harmonic 
+oscillators and planar three-body dynamics. Three methods of RK4, Leapfrog, 
+and SciPy's odeint are compared. An animation routine is used to dynamically
+display the trajectory of the planar bodies. 
+"""
+
+"""
+Instructions: 
+    1. Please change the global variable mode to 'animate' or 'plot' to specify
+    how the figures are display.
+    2. Animations are very intensive. Please run one question at a time 
+    for clear results. They have been placed into blocks intentionally for 
+    this purpose. 
+"""
+save_figs = False
+animate = True
+
+if(animate):
+    %matplotlib auto
+else:
+    %matplotlib inline
+
+#%% Imports
+from scipy.integrate import odeint
+import matplotlib as mpl
+import matplotlib.pyplot as plt  
+import numpy as np 
+from matplotlib.animation import FuncAnimation
+from scipy.optimize import newton
+
+#%% Matplotlib Defaults
+mpl.rcParams.update(mpl.rcParamsDefault)
+mpl.rcParams['font.family'] = 'STIXGeneral'
+plt.rcParams['font.size'] = 10
+plt.rcParams['axes.linewidth'] = 0.5
+mpl.rcParams.update(mpl.rcParamsDefault)
+mpl.rcParams['font.family'] = 'STIXGeneral'
+plt.rcParams['font.size'] = 10
+plt.rcParams['axes.linewidth'] = 0.5
+    
+    
+#%% Plotters
+def grid_plot(x_dim, y_dim, x, y, xlabels, ylabels, titles, title, fig_size=(3.2, 1.5), y_bottom=None, y_top=None): 
+
+    # Create plot
+    fig, axes = plt.subplots(x_dim, y_dim, figsize=fig_size)
+     
+    # Create settings
+    for i in range(x_dim*y_dim): 
+        idx1 = i//x_dim
+        idx2 = i%x_dim
+        axes[idx1, idx2].plot(x[i], y[i], 'b', linewidth=1.0)
+        axes[idx1, idx2].xaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+        axes[idx1, idx2].yaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+        axes[idx1, idx2].grid(True, linestyle=':')
+        axes[idx1, idx2].set_xlabel(xlabels[i])
+        axes[idx1, idx2].set_ylabel(ylabels[i])
+        axes[idx1, idx2].set_title(titles[i])
+        if(y_bottom!=None and y_top!=None): 
+            if(y_bottom[i]!=None and y_top[i]!=None): 
+                axes[idx1, idx2].set_ylim(y_bottom[i], y_top[i])
+        
+    fig.text(0.55, 0.97, title, ha='center', linespacing=1.5)
+    fig.tight_layout()
+    plt.show()
+    
+def planetary_plot(r, v, tlist, e, m, title): 
+    fig, axes = plt.subplots(2, figsize=(5.5, 4.5), gridspec_kw={'height_ratios': [1, 2]})
+    
+    colors = ['r', 'g', 'b']
+    points = []
+    for i in range(len(m)): 
+        axes[1].plot(r[:,i,0], r[:,i,1], linewidth=0.9, color=colors[i], ls='--', zorder=0)
+        axes[1].quiver(r[-1,i,0], r[-1,i,1],v[-1,i,0],v[-1,i,1], color=colors[i],width=0.006, headaxislength=3.5, headlength=4, zorder=1)
+        axes[1].plot(r[0,i,0], r[0,i,1], color=colors[i], marker='o', zorder=2, ms=2.6*m[i], markerfacecolor='none', mew=0.8*m[i])
+        points.append(axes[1].plot(r[-1,i,0], r[-1,i,1], color=colors[i], marker='o', ms=3*m[i],linestyle='None', zorder=3)[0])
+    axes[1].plot(0,0, color='black', marker='o', ms=6, zorder=4)
+    axes[0].plot(tlist, e, linewidth=0.9)
+
+    axes[0].set_xlabel("Time $(T_0)$")
+    axes[0].set_ylabel("Energy (arb. units)")
+    axes[1].set_xlabel("x (arb. units)")
+    axes[1].set_ylabel("y (arb. units)")
+    
+    axes[1].legend(points,['m=%d'%(m[0]), 'm=%d'%(m[1]), 'm=%d'%(m[2])], loc='upper left')
+    
+    for i in range(2): 
+        axes[i].xaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+        axes[i].yaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+        axes[i].grid(True, linestyle=':')
+    
+    axes[0].set_title(title)
+    fig.tight_layout()
+    plt.show()
+    
+#%% Planar Three-Body Body Animation
+"""This 2D animation dynamically updates the position and velocity of the 
+planar bodies. It accepts position and velocity data in the format of 
+(num_points, num_bodies, 2). The masses are reprensted by the size of the 
+points. The velocities are represented by arrows and scaled according to
+speed. The axes are also scaled dynamically. An energy plot is shown as well. 
+"""
+def animate_plot(r, v, tlist, e, m, title): 
+
+    # Create figure
+    fig, axes = plt.subplots(2,1, figsize=(6.5, 7.0), gridspec_kw={'height_ratios': [1, 2]})
+    
+    # Build plots
+    colors = ['r', 'g', 'b']
+    lines = []
+    points=[]
+    quivers=[]
+    for i in range(len(m)): 
+        lines.append(axes[1].plot([], [], linewidth=0.9, color=colors[i], ls='--', zorder=0)[0])
+        points.append(axes[1].plot([],[], color=colors[i], marker='o', ms=3*m[i],linestyle='None')[0])
+        axes[1].plot(r[0,i,0], r[0,i,1], color=colors[i], marker='o', ms=2.6*m[i], markerfacecolor='none', mew=0.8*m[i])
+        quivers.append(axes[1].quiver([0], [0], [1], [1], color=colors[i],width=0.006, headaxislength=4, headlength=4, zorder=1, scale=3, scale_units='inches', angles='xy'))
+        
+    energy_line = axes[0].plot([],[], linewidth=0.9, color='black')[0]
+    axes[1].plot(0,0, color='black', marker='o', ms=6)
+    axes[0].set_xlim(-0.1, tlist[-1]+0.1)
+
+    # Labels and ticks
+    axes[0].set_title(title)
+    axes[0].set_xlabel("Time $(T_0)$")
+    axes[0].set_ylabel("Energy (arb. units)")
+    axes[1].set_xlabel("x (arb. units)")
+    axes[1].set_ylabel("y (arb. units)")
+    axes[1].legend(points,['m=%d'%(m[0]), 'm=%d'%(m[1]), 'm=%d'%(m[2])], loc='upper left')
+        
+    for i in range(2): 
+        axes[i].xaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+        axes[i].yaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+        axes[i].grid(True, linestyle=':')
+        
+    # Main animation routine to dynamically update variables 
+    def animate(i):
+        for j in range(3): 
+            lines[j].set_data(r[:i,j,0],r[:i,j,1])
+            points[j].set_data(r[i,j,0], r[i,j,1])
+            quivers[j].set_UVC(v[i,j,0],v[i,j,1])
+            quivers[j].set_offsets([r[i,j,0], r[i,j,1]])
+            
+        x_range = np.max(r[:i,:,0])-np.min(r[:i,:,0])
+        y_range = np.max(r[:i,:,1])-np.min(r[:i,:,1])
+        axes[1].set_xlim(np.min(r[:i,:,0]-0.1*x_range), np.max(r[:i,:,0])+0.1*x_range)
+        axes[1].set_ylim(np.min(r[:i,:,1]-0.1*y_range), np.max(r[:i,:,1])+0.1*y_range)
+        
+        e_range = np.max(e[:i])-np.min(e[:i])
+        energy_line.set_data(tlist[:i],e[:i])
+        axes[0].set_ylim(np.min(e[:i])-0.1*e_range, np.max(e[:i])+0.1*e_range)
+        if(save_figs and (i==20001 or i==25001 or i==5001)):
+            plt.savefig('Animation_frame_' + str(i) +'.pdf', format='pdf', dpi=1200, bbox_inches='tight')
+        
+    # Note that a global variable is used to avoid animation recycling
+    global myAnimation
+    myAnimation = FuncAnimation(fig, animate, interval=1, frames=np.arange(1,len(tlist),200), repeat=True, repeat_delay=4000)
+    plt.show()
+#%% SHO Animation
+"""This 2D animation dynamically updates the position and velocity of the 
+planar bodies. It accepts position and velocity data in the format of 
+(num_points, num_bodies, 2). The masses are reprensted by the size of the 
+points. The velocities are represented by arrows and scaled according to
+speed. The axes are also scaled dynamically. An energy plot is shown as well. 
+"""
+def animate_sho(tlist_leapfrog, x_leapfrog, v_leapfrog, e_leapfrog, tlist_rk4, x_rk4, v_rk4, e_rk4, title): 
+
+    # Create figure
+    fig, axes = plt.subplots(2,2, figsize=(5.5, 5.5))
+    
+    # Build plots
+    xlabels = [["x (m)", "t ($T_0$)"],["x (m)", "t ($T_0$)"]]
+    ylabels = [["v (m/s)", "E (J)"],["v (m/s)", "E (J)"]]
+    titles = [["Leapfrog", "Leapfrog"],["RK4", "RK4"]]
+    x_bottom = [[-1.2, -1], [-1.2, -1]]
+    x_top = [[1.2, tlist_rk4[-1]+1], [1.2, tlist_rk4[-1]+1]]
+    y_bottom = [[-1.2, -0.1], [-1.2, -0.1]]
+    y_top = [[1.2, 1.0], [1.2, 1.0]]
+    lines=[]
+    points_xv=[axes[i,0].plot([],[], marker='o', color='r', zorder=4)[0] for i in range(2)]
+    points_e=[axes[i,1].plot([],[], marker='o', color='r', zorder=4)[0] for i in range(2)]
+    for i in range(2):
+        for j in range(2): 
+            lines.append(axes[i,j].plot([],[], 'b', linewidth=1.0, zorder=1)[0])
+            axes[i,j].xaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+            axes[i,j].yaxis.set_tick_params(which='major', size=3, width=0.5, direction='in', right='on')
+            axes[i,j].grid(True, linestyle=':')
+            axes[i,j].set_xlabel(xlabels[i][j])
+            axes[i,j].set_ylabel(ylabels[i][j])
+            axes[i,j].set_title(titles[i][j])
+            axes[i,j].set_xlim(x_bottom[i][j], x_top[i][j])
+            axes[i,j].set_ylim(y_bottom[i][j], y_top[i][j])
+            
+    fig.text(0.52, 0.96, title, ha='center', linespacing=1.5)
+    period_text = fig.text(0.52, 0.93, "Period: 0", ha='center', linespacing=1.5)
+    fig.tight_layout(pad=2) 
+    
+    # Main animation routine to dynamically update variables 
+    def animate(i):
+        lines[0].set_data(x_leapfrog[:i],v_leapfrog[:i])
+        lines[1].set_data(tlist_leapfrog[:i], e_leapfrog[:i])
+        lines[2].set_data(x_rk4[:i],v_rk4[:i])
+        lines[3].set_data(tlist_rk4[:i], e_rk4[:i])
+        points_xv[0].set_data(x_leapfrog[i-1],v_leapfrog[i-1])
+        points_xv[1].set_data(x_rk4[i-1],v_rk4[i-1])
+        points_e[0].set_data(tlist_leapfrog[i-1],e_leapfrog[i-1])
+        points_e[1].set_data(tlist_rk4[i-1],e_rk4[i-1])
+        period = tlist_rk4[i-1]
+        period_text.set_text("Period: %.2f"%period)
+        
+        e_leapfrog_range = np.max(e_leapfrog[:i])-np.min(e_leapfrog[:i])
+        e_rk4_range = np.max(e_rk4[:i])-np.min(e_rk4[:i])
+        axes[1,1].set_ylim(np.min(e_rk4[:i])-0.1*e_rk4_range, np.max(e_rk4[:i])+0.1*e_rk4_range)
+        axes[0,1].set_ylim(np.min(e_leapfrog[:i])-0.1*e_leapfrog_range, np.max(e_leapfrog[:i])+0.1*e_leapfrog_range)
+        
+        lf_range_x = np.max(x_leapfrog[:i])-np.min(x_leapfrog[:i])
+        lf_range_v = np.max(v_leapfrog[:i])-np.min(v_leapfrog[:i])
+        axes[0,0].set_ylim(np.min(v_leapfrog[:i])-0.1*lf_range_v, np.max(v_leapfrog[:i])+0.1*lf_range_v)
+        axes[0,0].set_xlim(np.min(x_leapfrog[:i])-0.1*lf_range_x, np.max(x_leapfrog[:i])+0.1*lf_range_x)
+        
+    # Note that a global variable is used to avoid animation recycling
+    rate = ((tlist_rk4[1]-tlist_rk4[0]))*20
+    global myAnimation
+    myAnimation = FuncAnimation(fig, animate, interval=rate, frames=np.arange(1,len(tlist_rk4)+1,int(0.2/(tlist_rk4[1]-tlist_rk4[0]))), repeat=True, repeat_delay=4000)
+    plt.show(block=False)
+#%% RK4 Solver
+"""Runge-Kutta 4 ODE Solver. Additional function arguments can be supplied
+through args."""
+def RK4(f,y,t,h, *args): 
+    k1 = f(y,t, *args)
+    k2 = f(y+h*k1/2, t+h/2, *args)
+    k3 = f(y+h*k2/2, t+h/2, *args)
+    k4 = f(y+h*k3, t+h, *args)
+    y = y + (1/6)*h*(k1+2*k2+2*k3+k4)
+    return y
+
+#%% Leapfrog Solver
+"""Leapfrog Solver. Additional function arguments can be supplied through 
+args. An id=0 is for dx/dt and an id=1 is for dv/dt."""
+def leapfrog(diffeq, r0, v0, t, h, *args): 
+    hh = h/2.0
+    r1 = r0 + hh*diffeq(0, r0, v0, t, *args)
+    v1 = v0 + h*diffeq(1, r1, v0, t+hh, *args)
+    r1 = r1 + hh*diffeq(0, r0, v1, t+h, *args)
+    return r1, v1
+
+#%% Simple Harmonic Oscillator Equations
+"""Note that we assume w=m=k=1, so dx/dt=v and dv/dt=-x=a."""
+
+"For RK4"
+def SHO_RK4(y, t, *args): 
+    dy=np.zeros((len(y)))
+    dy[0] = y[1] 
+    dy[1] = -y[0] 
+    return dy 
+
+"For Leapfrog"
+def SHO_Leapfrog(id, x, v, t): 
+    if(id==0):
+        return v
+    else:
+        return -x
+    
+"Energy"
+def SHO_Energy(y): 
+    return 0.5*y[0]**2+0.5*y[1]**2
+
+#%% Planar Three-Body Equations 
+"""Note that we hardcode G=1 because it is a constant.
+Also note that r and v must have shapes (3, 2). 
+
+This assumes 3 bodies only but it would be trivial to extend to more bodies
+through the usage of combinations for the dv and energy calculations. Here, 
+basic indexing through % operator is used."""
+     
+"dx/dt"
+def Planetary_dr(v):
+    return v
+
+"dv/dt"
+def Planetary_dv(r, m): 
+    G = 1
+    dv = np.zeros((3,2))
+    for i in range(3): 
+        j = (i+1)%3
+        k = (i+2)%3
+        dv[i] = dv[i] -G*m[j]*(r[i]-r[j])/(np.linalg.norm(r[i]-r[j]))**3
+        dv[i] = dv[i] -G*m[k]*(r[i]-r[k])/(np.linalg.norm(r[i]-r[k]))**3            
+    return dv
+    
+"For RK4 and odeint"
+def Planetary_RK4(y, t, m): 
+    y = np.reshape(y, (6,2))
+    r = y[0:3]
+    v = y[3:6]
+    
+    dy = np.zeros((6, 2))
+    dy[0:3] = Planetary_dr(v)
+    dy[3:6] = Planetary_dv(r, m)
+    dy= np.reshape(dy,(12))
+    return dy
+
+"For Leapfrog"
+def Planetary_Leapfrog(id, r, v, t, m):
+    if(id==0):
+        return Planetary_dr(v)
+    else:
+        return Planetary_dv(r, m)
+    
+"Energy"
+def Planetary_Energy(r, v, m): 
+    G = 1
+    r = np.reshape(r, (3,2))
+    v = np.reshape(v, (3,2))
+    KE = 0 
+    PE = 0
+    for i in range(3): 
+        j= (i+1)%3
+        KE += 0.5*m[i]*np.dot(v[i], v[i])
+        PE += -G*m[i]*m[j]/(np.linalg.norm(r[i]-r[j]))
+    E = KE + PE
+    return E
+
+#%% Planar Three-Body Experiment
+"""This function accepts conditions to run a planar 3-body experiment
+and display an animation. Note that flip_vel is used to flip the velocity
+halfway through the experiment for investigating solver methods."""
+def planar_3_body_experiment(method, w, dt, num_periods, r_0, v_0, m, flip_vel=False, plot=False):
+    
+    # Create time list
+    T0 = 2*np.pi/w
+    tmax = num_periods*T0
+    tlist=np.arange(0.0, tmax, dt) 
+    npts = len(tlist)
+    
+    # Format title to display omega
+    if dw==0: 
+        omega_string = "$\omega$={:.1f}".format(w)
+    elif dw<0: 
+        omega_string = "$\omega$={:.1f} - {:.1E}".format(w, np.abs(w-1))
+    else: 
+        omega_string = "$\omega$={:.1f} + {:.1E}".format(w, w-1)
+    title = method + " for " + omega_string
+       
+    # Leapfrog method
+    if(method=="Leapfrog"):
+        r, v = np.zeros((npts, 3,2)), np.zeros((npts, 3,2))
+        e = np.zeros(npts)
+        r[0] = r_0
+        v[0] = v_0
+        e[0] = Planetary_Energy(r[0], v[0], m)
+        for i in range(1, npts):
+            r[i], v[i] = leapfrog(Planetary_Leapfrog, r[i-1], v[i-1],tlist[i-1],dt,m)
+            if(flip_vel and tlist[i-1]==tlist[int(npts/2)]): 
+                v[i] = -v[i]
+            e[i] = Planetary_Energy(r[i], v[i], m)
+            
+    # RK4 method
+    if(method=="RK4"): 
+        y = np.zeros((npts, 12))
+        r_0 = np.reshape(r_0,(6))
+        v_0 = np.reshape(v_0,(6))
+        e = np.zeros(npts)
+        y[0][0:6] = r_0
+        y[0][6:12] = v_0
+
+        e[0] = Planetary_Energy(y[0][0:6], y[0][6:12], m)
+        for i in range(1, npts): 
+            y[i] = RK4(Planetary_RK4, y[i-1], tlist[i-1], dt, m)
+            if(flip_vel and tlist[i-1]==tlist[int(npts/2)]): 
+                y[i][6:12] = -y[i][6:12]
+            e[i] = Planetary_Energy(y[i][0:6], y[i][6:12], m)
+            
+        y = np.reshape(y, (npts,6,2))
+        r = y[:,0:3]
+        v = y[:,3:6]
+        
+    # ODEINT method. Note that an atol and rtol of 1E-12 is set
+    if(method=="ODEINT"): 
+        y_0 = np.zeros((12))
+        r_0 = np.reshape(r_0,(6))
+        v_0 = np.reshape(v_0,(6))
+        e = np.zeros(npts)
+        y_0[0:6] = r_0
+        y_0[6:12] = v_0
+        
+        y = odeint(Planetary_RK4, y_0, tlist, args=(m,), atol=1E-12, rtol=1E-12)
+        for i in range(npts): 
+            e[i] = Planetary_Energy(y[i][0:6], y[i][6:12], m)
+            
+        y = np.reshape(y, (npts,6,2))
+        r = y[:,0:3]
+        v = y[:,3:6]
+        if(plot): 
+            planetary_plot(r, v, tlist/T0, e, title)
+        else: 
+            animate_plot(r, v, tlist/T0, e, m, title)
+            
+    if(animate):
+        animate_plot(r, v, tlist/T0, e, m, title)
+    else:
+        planetary_plot(r, v, tlist/T0, e, m, title)
+       
+#%% Planar Three-Body Initial Conditions
+"Find root of Euler's quitic equation"
+def get_root(m1, m2, m3):
+    def f(x, m1, m2, m3): 
+        return (m2+m3)*x**5 + (2*m2+3*m3)*x**4 + (m2+3*m3)*x**3 + (-3*m1-m2)*x**2 + (-3*m1-2*m2)*x + (-m1-m2)
+    def df(x, m1, m2, m3): 
+        return 5*(m2+m3)*x**4 + 4*(2*m2+3*m3)*x**3 + 3*(m2+3*m3)*x**2 + 2*(-3*m1-m2)*x + (-3*m1-2*m2)
+    def ddf(x, m1, m2, m3): 
+        return 4*5*(m2+m3)*x**3 + 3*4*(2*m2+3*m3)*x**2 + 2*3*(m2+3*m3)*x + 2*(-3*m1-m2)
+    
+    root = newton(f, 0.78, fprime=df, args=(m1, m2, m3))
+    return root
+
+"Find distance of a=x3-x2"
+def get_a(m1, m2, m3, lambda_root, w): 
+    num = m1*(1+2*lambda_root)
+    denom = (lambda_root**2)*(1+lambda_root)**2
+    a = (1/(w**2))*(m2+m3-num/denom)
+    a = a**(1./3)
+    return a
+
+"Get initial x positions"
+def get_initial_r_x(m1, m2, m3, a, lambda_root, w):
+    x2 = (1/((w**2)*(a**2)))*(m1/(lambda_root**2)-m3)
+    x1 = x2 - lambda_root*a
+    x3 = -(m1*x1+m2*x2)/m3
+    return np.array([x1, x2, x3])
+
+"Get initial y velocities"
+def get_initial_v_y(x, w):
+    v = w*x
+    return v
+
+#%% Simple Harmonic Oscillator Experiment
+"""This function accepts conditions to calculate the trajectory of a SHO."""
+def sho_experiment(method, num_periods, dt): 
+    T0 = 2*np.pi
+    dt = dt*T0
+    tmax = num_periods*T0
+    tlist=np.arange(0.0, tmax+dt, dt) 
+    npts = len(tlist)
+    
+    y = np.zeros((npts,2))
+    E = np.zeros(npts)
+    y[0,:] = np.array([1.0, 0.0])
+    E[0] = SHO_Energy(y[0,:])
+    
+    if(method=='RK4'): 
+        for i in range(1, npts):
+            y[i,:] = RK4(SHO_RK4, y[i-1,:], tlist[i-1], dt)
+            E[i] = SHO_Energy(y[i,:])
+    
+    if(method=='Leapfrog'): 
+        for i in range(1, npts): 
+            y[i,0], y[i,1] = leapfrog(SHO_Leapfrog, y[i-1,0], y[i-1,1],tlist[i-1],dt)
+            E[i] = SHO_Energy(y[i,:])
+    
+    return tlist/T0, y, E
+
+#%% Question 1a)
+"Discussion"
+
+"""From the plots and animations, it is clear that the Leapfrog method 
+conserves energy, while the RK4 method does not. The Leapfrog energy oscillates
+around a constant center point, while the RK4 method gradually loses energy
+and 'spirals' inwards to zero."""
+
+dts = [0.02, 0.04, 0.1]
+for dt in dts: 
+    num_periods = 800
+    tlist_leapfrog, y_leapfrog, E_leapfrog = sho_experiment("Leapfrog", num_periods, dt)
+    tlist_rk4, y_rk4, E_rk4 = sho_experiment("RK4", num_periods, dt)
+    grid_plot(2, 2, [y_leapfrog[:,0], tlist_leapfrog, y_rk4[:,0], tlist_rk4], 
+              [y_leapfrog[:,1],E_leapfrog,y_rk4[:,1],E_rk4], 
+              ["x (m)", "t (s)","x (m)", "t (s)"], 
+              ["v (m/s)", "E (J)","v (m/s)", "E (J)"], 
+              ["Leapfrog", "Leapfrog","RK4", "RK4"], 
+              "%d periods ($T_0$), h=%.2f$T_0$"%(num_periods,dt), fig_size=(5,5), y_bottom=[None, 0, None, 0], y_top=[None, 1, None, 1])
+
+#%% Question 1b) i
+dt = 0.2
+num_periods = 40
+tlist_leapfrog, y_leapfrog, E_leapfrog = sho_experiment("Leapfrog", num_periods, dt)
+tlist_rk4, y_rk4, E_rk4 = sho_experiment("RK4", num_periods, dt)
+if(animate): 
+    animate_sho(tlist_leapfrog, y_leapfrog[:,0], y_leapfrog[:,1], E_leapfrog, tlist_rk4, y_rk4[:,0], y_rk4[:,1], E_rk4, "%d periods ($T_0$), h=%.2f$T_0$"%(num_periods,dt))
+else:
+    grid_plot(2, 2, [y_leapfrog[:,0], tlist_leapfrog, y_rk4[:,0], tlist_rk4], 
+              [y_leapfrog[:,1],E_leapfrog,y_rk4[:,1],E_rk4], 
+              ["x (m)", "t (s)","x (m)", "t (s)"], 
+              ["v (m/s)", "E (J)","v (m/s)", "E (J)"], 
+              ["Leapfrog", "Leapfrog","RK4", "RK4"], 
+              "%d periods ($T_0$), h=%.2f$T_0$"%(num_periods,dt), fig_size=(5,5), y_bottom=[None, 0, None, 0], y_top=[None, 1, None, 1])
+        
+#%% Question 1b) ii
+dt = 0.02
+num_periods = 40
+tlist_leapfrog, y_leapfrog, E_leapfrog = sho_experiment("Leapfrog", num_periods, dt)
+tlist_rk4, y_rk4, E_rk4 = sho_experiment("RK4", num_periods, dt)
+if(animate): 
+    animate_sho(tlist_leapfrog, y_leapfrog[:,0], y_leapfrog[:,1], E_leapfrog, tlist_rk4, y_rk4[:,0], y_rk4[:,1], E_rk4, "%d periods ($T_0$), h=%.2f$T_0$"%(num_periods,dt))
+else:
+    grid_plot(2, 2, [y_leapfrog[:,0], tlist_leapfrog, y_rk4[:,0], tlist_rk4], 
+              [y_leapfrog[:,1],E_leapfrog,y_rk4[:,1],E_rk4], 
+              ["x (m)", "t (s)","x (m)", "t (s)"], 
+              ["v (m/s)", "E (J)","v (m/s)", "E (J)"], 
+              ["Leapfrog", "Leapfrog","RK4", "RK4"], 
+              "%d periods ($T_0$), h=%.2f$T_0$"%(num_periods,dt), fig_size=(5,5), y_bottom=[None, 0, None, 0], y_top=[None, 1, None, 1])
+    
+#%% Question 2a) i
+"Discussion"
+
+"""It is observed that tiny perturbations to the input conditions
+generate completely different trajectories, implying that these initial
+conditions are unstable."""
+
+dw = 0
+w = 1.+dw
+dt = 0.001
+num_periods = 4
+m = np.array([1., 2., 3.])
+
+lambda_root = get_root(m[0], m[1], m[2])
+a = get_a(m[0], m[1], m[2], lambda_root, w)
+
+r_0 = np.zeros((3,2))
+v_0 = np.zeros((3,2))
+r_0[:,0] = get_initial_r_x(m[0], m[1], m[2], a, lambda_root, w)
+v_0[:,1] = get_initial_v_y(r_0[:,0], w)
+
+planar_3_body_experiment("Leapfrog", w, dt, num_periods, r_0, v_0, m)
+
+#%% Quesiton 2a) ii
+planar_3_body_experiment("RK4", w, dt, num_periods, r_0, v_0, m)
+
+#%% Question 2a) iii
+dw = 1E-9
+w = 1.+dw
+dt = 0.001
+num_periods = 4
+m = np.array([1., 2., 3.])
+
+lambda_root = get_root(m[0], m[1], m[2])
+a = get_a(m[0], m[1], m[2], lambda_root, w)
+
+r_0 = np.zeros((3,2))
+v_0 = np.zeros((3,2))
+r_0[:,0] = get_initial_r_x(m[0], m[1], m[2], a, lambda_root, w)
+v_0[:,1] = get_initial_v_y(r_0[:,0], w)
+
+planar_3_body_experiment("Leapfrog", w, dt, num_periods, r_0, v_0, m)
+
+#%% Quesiton 2a) iv
+planar_3_body_experiment("RK4", w, dt, num_periods, r_0, v_0, m)
+
+#%% Question 2a) v
+dw = -1E-9
+w = 1.+dw
+dt = 0.001
+num_periods = 4
+m = np.array([1., 2., 3.])
+
+lambda_root = get_root(m[0], m[1], m[2])
+a = get_a(m[0], m[1], m[2], lambda_root, w)
+
+r_0 = np.zeros((3,2))
+v_0 = np.zeros((3,2))
+r_0[:,0] = get_initial_r_x(m[0], m[1], m[2], a, lambda_root, w)
+v_0[:,1] = get_initial_v_y(r_0[:,0], w)
+
+planar_3_body_experiment("Leapfrog", w, dt, num_periods, r_0, v_0, m)
+
+#%% Quesiton 2a) vi
+planar_3_body_experiment("RK4", w, dt, num_periods, r_0, v_0, m)
+
+#%% Question 2b)
+"Discussion"
+
+"""Comparing the plots to 2a), it is observed that the RK4 and ODEINT
+are the most similar for these particular initial conditions. This may 
+indicate that RK4 is more accuracy for shorter time periods. However, 
+this would not be the case for longer simulations. """
+
+planar_3_body_experiment("ODEINT", w, dt, num_periods, r_0, v_0, m)
+
+#%% Question 2c) i
+"Discussion"
+
+"""It is observed that for the Leapfrog method,  the energy plot is symmetric 
+and the masses nearly return to their initial conditions. This is expected 
+because the Leapfrog method is reversible. 
+
+The RK4 method on the other hand continues to lose energy over time and the 
+masses do not return to the original locations. This is because the RK4
+method is irreversible."""
+
+dw = 1E-9
+w = 1.+dw
+dt = 0.001
+num_periods = 8
+m = np.array([1., 2., 3.])
+
+lambda_root = get_root(m[0], m[1], m[2])
+a = get_a(m[0], m[1], m[2], lambda_root, w)
+
+r_0 = np.zeros((3,2))
+v_0 = np.zeros((3,2))
+r_0[:,0] = get_initial_r_x(m[0], m[1], m[2], a, lambda_root, w)
+v_0[:,1] = get_initial_v_y(r_0[:,0], w)
+
+planar_3_body_experiment("Leapfrog", w, dt, num_periods, r_0, v_0, m, flip_vel=True)
+
+#%% Question 2c) ii
+planar_3_body_experiment("RK4", w, dt, num_periods, r_0, v_0, m, flip_vel=True)
+
+#%% Question 2d) 
+"Discussion"
+
+"""The simulation looks clearly stable over 8 iterations with an oscillating
+energy in the Leapfrog mode. Changing the mass by E-6 does not affect the 
+stability, indicating that this set of initial conditions is stable."""
+
+w = 0.99999
+dt = 0.001
+num_periods = 8
+m = [1., 1., 1.+1E-6]
+
+lambda_root = get_root(m[0], m[1], m[2])
+a = get_a(m[0], m[1], m[2], lambda_root, w)
+
+r_0 = np.zeros((3,2))
+v_0 = np.zeros((3,2))
+
+r_0[0, 0] = 0.97000436
+r_0[0, 1] = -0.24308753
+r_0[1, 0] = -r_0[0, 0]
+r_0[1, 1]= -r_0[0, 1] 
+
+v_0[2, 0] = -0.93240737
+v_0[2, 1] = -0.86473146
+v_0[0, 0] = -v_0[2, 0]/2.
+v_0[0, 1] = -v_0[2, 1]/2.
+v_0[1, 0] = v_0[0, 0]
+v_0[1, 1] = v_0[0, 1]
+
+# Animation 1
+planar_3_body_experiment("Leapfrog", w, dt, num_periods, r_0, v_0, m, plot=True)

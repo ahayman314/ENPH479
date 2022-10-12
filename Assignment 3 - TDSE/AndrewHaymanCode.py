@@ -1,0 +1,461 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Feb  7 14:18:19 2022
+
+@author: Andrew Hayman
+
+This program examines the Time Dependent Schrodinger Equation (TDSE) for
+three potentials: free space, the harmonic oscillator and the two-well 
+potential. Sparse matrix multiplication and matrix slicing are timed and
+compared for the free space method. The Virial Theorem is verified for the 
+harmonic oscillator and the effects of the two-well coefficients are examined
+on the quantum tunneling rate. Plots and animations are used to visulize the
+results. 
+"""
+
+"""
+Instructions: 
+Please run one question block at a time when using animate. After each 
+animation, it is encouraged to run the "Clean up" block to ensure all
+memory is released. Please be patient as the animations load. 
+
+For no animations, run the entire notebook. 
+
+To save figures, use no animations and set save_figs varaible.
+"""
+save_figs = False
+animate = True
+
+if(animate):
+    %matplotlib auto
+else:
+    %matplotlib inline
+    
+#%% Imports
+import matplotlib as mpl
+import matplotlib.pyplot as plt  
+import numpy as np 
+from matplotlib.animation import FuncAnimation
+from scipy.sparse import csr_matrix
+from scipy.integrate import simpson
+import time
+import gc
+import sys
+
+#%% Matplotlib Defaults
+mpl.rcParams.update(mpl.rcParamsDefault)
+mpl.rcParams['font.family'] = 'STIXGeneral'
+plt.rcParams['font.size'] = 12
+plt.rcParams['axes.linewidth'] = 0.5
+
+#%% Potential Functions
+"""These define potential functions for some value x."""
+class Free_Space(): 
+    def __init__(self): 
+        pass
+    def __call__(self, x): 
+        return 0*x
+
+class Harmonic_Oscillator(): 
+    def __init__(self):
+        pass
+    def __call__(self, x): 
+        return 0.5*x**2
+
+class Double_Well(): 
+    def __init__(self, a, b): 
+        self.a = a
+        self.b = b
+    def __call__(self, x): 
+        return self.a*x**4-self.b*x**2
+
+#%% Gaussian Function
+class Gaussian(): 
+    """This class defines a complex gaussian function based on parameters
+    sigma, x_0 and k_0. It returns the real and imag parts of the gaussian
+    function."""
+    def __init__(self, sigma, x_0, k_0):
+        self.sigma = sigma
+        self.x_0 = x_0
+        self.k_0 = k_0
+        self.amp = (sigma*np.sqrt(np.pi))**(-1/2)
+        
+    def __call__(self, x):
+        output = self.amp*np.exp(-(x-self.x_0)**2/(2*self.sigma**2)+1j*self.k_0*x)
+        real= np.real(output)
+        imag = np.imag(output)
+        return real, imag
+    
+#%% Matrix Solving methods
+"""These define different matrix solving methods for the equations of 
+motion of the Hamiltonian. The matrix multiplication method can take in any 
+matrix A, full or sparse. """
+def matrix_multiplication(id, R, I, t, A, b): 
+    if(id==0): 
+        # dR/dt
+        dR = A@I
+        dR[0] += b*I[-1]
+        dR[-1] += b*I[0]
+        return dR
+    else: 
+        # dI/dt
+        dI = -A@R
+        dI[0] -= b*R[-1]
+        dI[-1] -= b*R[0]
+        return dI
+    
+def matrix_slicing(id, R, I, t, b, a, tmp): 
+    if(id==0): 
+        # dR/dt
+        dR = a*I
+        tmp[0] = b*I[-1]
+        tmp[-1]= b*I[0]
+        tmp[1:-1] = b*I
+        dR += tmp[:-2] + tmp[2:]
+        return dR
+    else: 
+        # dI/dt
+        dI = -a*R
+        tmp[0] = -b*R[-1]
+        tmp[-1]= -b*R[0]
+        tmp[1:-1] = -b*R
+        dI += tmp[:-2] + tmp[2:]
+        return dI
+
+#%% Leapfrog Solver
+"""Leapfrog Solver. Additional function arguments can be supplied through 
+args. An id=0 is for dr/dt and an id=1 is for dv/dt."""
+def leapfrog(diffeq, r0, v0, t, h, *args): 
+    hh = h/2.0
+    r1 = r0 + hh*diffeq(0, r0, v0, t, *args)
+    v1 = v0 + h*diffeq(1, r1, v0, t+hh, *args)
+    r1 = r1 + hh*diffeq(0, r0, v1, t+h, *args)
+    return r1, v1
+
+#%% Plotter helper
+def get_lim(x):
+    dx = np.max(x)-np.min(x)
+    l = np.min(x)-0.1*dx
+    r = np.max(x)+0.1*dx
+    return l, r
+    
+#%% Experiment Class
+class HamiltonianExperiment(): 
+    def __init__(self, v): 
+        """Set potential function."""
+        self.v = v
+    
+    def set_space_steps(self, left, right, n_dx): 
+        """Set the space steps."""
+        self.n_dx = n_dx
+        self.x = np.linspace(left, right, n_dx)
+        self.h = self.x[1]-self.x[0]
+        self.dt = 0.5*(self.h)**2
+        
+    def set_time_steps(self, n_dt): 
+        """Set the time steps using an explicit number of steps."""
+        self.n_dt = n_dt
+        self.t = np.arange(0, self.n_dt)
+        self.time_mode = "time_step"
+        
+    def set_periods(self, n_periods): 
+        """Set the time steps using the number of periods and assuming
+        w_0=1. """
+        self.n_dt = int(n_periods*2*np.pi/self.dt)
+        self.t = np.linspace(0, n_periods, self.n_dt)
+        self.n_periods = n_periods
+        self.time_mode = "period"
+        
+    def initialize_state(self, wavepacket): 
+        """Initialize the wave function matrices for all time and space 
+        points. Use some function of x to specify the wave at t=0. """
+        
+        # Get a and b matrix elements
+        self.b = -1/(2*self.h**2)
+        self.a = 1/self.h**2+self.v(self.x)
+        
+        # Initialize the A matrix using a and b matrix elements
+        self.A = np.zeros((self.n_dx, self.n_dx))
+        for i in range(self.n_dx):
+            for j in range(self.n_dx): 
+                if(i==j):
+                    self.A[i][j] = self.a[i]
+                if(i==(j-1) or j==(i-1)): 
+                    self.A[i][j] = self.b
+                    
+        # Initialize real and imaginary parts of wave function
+        self.R = np.zeros((self.n_dt, self.n_dx))
+        self.I = np.zeros((self.n_dt, self.n_dx))
+        self.R[0], self.I[0] = wavepacket(self.x)
+              
+    def evolve(self, matrix_method_name, time_method=False):
+        """Using the initial conditions, evolve the state over all time 
+        steps. Note that the b element needs to be passed in for applying
+        periodic boundary conditions. The matrix method specifies the method
+        to solve the equations of motion in the Leapfrog equations."""
+        
+        start = time.time()
+            
+        if(matrix_method_name=="Sparse Matrix Multiplication"): 
+            matrix_method = matrix_multiplication
+            A_sparse = csr_matrix(self.A)
+            args = (A_sparse, self.b)  
+        elif(matrix_method_name=="Full Matrix Multiplication"):
+            matrix_method = matrix_multiplication
+            args = (self.A, self.b)
+        elif(matrix_method_name=="Matrix Slicing"): 
+            matrix_method = matrix_slicing
+            tmp = np.zeros(self.n_dx+2)
+            args = (self.b, self.a, tmp)
+        else: 
+            print("Please enter a valid matrix method.")
+            
+        for i in range(1, self.n_dt):       
+            self.R[i], self.I[i] = leapfrog(matrix_method, 
+                                            self.R[i-1], 
+                                            self.I[i-1], 
+                                            i, 
+                                            self.dt, 
+                                            *args)
+        
+        if time_method: 
+            end = time.time()
+            print("Time for", matrix_method_name, "for N=", self.n_dx, 
+                  ": %.2f seconds" %(end-start))
+            
+        self._get_wavefunction()
+        self._get_x_expectation()
+        
+    def _get_x_expectation(self): 
+        self.x_exp = np.zeros(self.n_dt)
+        for i in range(self.n_dt): 
+            self.x_exp[i] = simpson(self.x*self.state[i], self.x)
+        
+    def get_T_average(self): 
+        """Find kinetic energy expectation value over 1 period."""
+        n_dt = int(self.n_dt/self.n_periods)
+        dR = np.zeros((n_dt, self.n_dx-1))
+        dI = np.zeros((n_dt, self.n_dx-1))
+        state = np.zeros((n_dt, self.n_dx-1))
+        T_exp = np.zeros(n_dt)
+        for i in range(n_dt): 
+            dR[i] = np.diff(self.R[i])/np.diff(self.x)
+            dI[i] = np.diff(self.I[i])/np.diff(self.x)
+            state[i] = dR[i]*dR[i]+dI[i]*dI[i]
+            T_exp[i] = simpson(state[i], exp.x[1:]-(exp.x[1]-exp.x[0])/2)
+        average_T = 0.5*np.sum(T_exp)/n_dt
+        return average_T
+        
+    def get_V_average(self): 
+        """Find potential energy expectation value over 1 period."""
+        n_dt = int(self.n_dt/self.n_periods)
+        V_x = self.v(self.x)
+        V_exp = np.zeros(n_dt)
+        for i in range(n_dt): 
+            V_exp[i] = simpson(V_x*self.state[i], self.x)
+        average_V = np.sum(V_exp)/n_dt
+        return average_V
+    
+    def _get_wavefunction(self): 
+        """Using the real and imaginary parts, construct probability 
+        density function. """
+        self.state = np.zeros((self.n_dt, self.n_dx))
+        for i in range(self.n_dt): 
+            self.state[i] = (self.R[i]*self.R[i])+(self.I[i]*self.I[i])
+            
+    def animate_wavefunction(self, save_frames=None, save_name=None): 
+        """Displays an animated wave function."""
+        fig, axes = plt.subplots(1, figsize=(3.2, 3.2))
+        line = axes.plot([], [], linewidth=0.9, color='b')[0]
+        axes.plot(self.x, 0.02*self.v(self.x), color='orange')
+        axes.set_xlabel("x (a.u.)")
+        axes.set_ylabel("$|\Psi(x,t)|^2$ (a.u.)")
+        axes.set_xlim(get_lim(self.x))
+        y_top = np.max(self.state) + 0.1
+        y_bottom = np.min(0.02*self.v(self.x))-0.1
+        axes.set_ylim(y_bottom, y_top)
+        axes.grid(True, linestyle=':')
+        axes.vlines(x=self.x[0], ymin=0, ymax = 10, color='black', ls='--')
+        axes.vlines(x=self.x[-1], ymin=0, ymax = 10, color='black', ls='--')
+        
+        def animate(i): 
+            line.set_data(self.x, self.state[i])
+            if(self.time_mode=="period"): 
+                axes.set_title("t = %.2f $T_0$"%(self.t[i]))
+            else: 
+                axes.set_title("Time Step = " + str(i))
+            
+        myAnimation = FuncAnimation(fig, 
+                                    animate, 
+                                    interval = 1, 
+                                    blit=False,
+                                    frames = np.arange(0,self.n_dt,100), 
+                                    repeat=True,
+                                    save_count=0)
+        plt.show()
+        self.animation = myAnimation
+
+    def plot_wavefunction(self, t, save_name=None): 
+        """Plots a snapshot of the wave function at a given time step."""
+        
+        if isinstance(t, list): 
+            fig, axes = plt.subplots(2, 3, figsize=(10, 6))
+            all_states = np.array([])
+            if(self.time_mode == "period"): 
+                for i in range(len(t)): 
+                    idx = int(2*np.pi*np.array(t[i])/self.dt)
+                    all_states = np.append(all_states, self.state[idx])
+                y_top = np.max(all_states) + 0.1
+            else: 
+                y_top = np.max(self.state)+0.1
+            for i in range(2):
+                for j in range(3):
+                    if(self.time_mode == "period"): 
+                        idx = int(2*np.pi*t[3*i+j]/self.dt)
+                    else: 
+                        idx = t[3*i+j]
+                    axes[i][j].plot(self.x, self.state[idx], linewidth=0.9, color='b')
+                    axes[i][j].plot(self.x, 0.02*self.v(self.x), color='orange')
+                    axes[i][j].set_xlabel("x (a.u.)")
+                    axes[i][j].set_ylabel("$|\Psi(x,t)|^2$ (a.u.)")
+                    axes[i][j].set_xlim(get_lim(self.x))
+                    y_bottom = np.min(0.02*self.v(self.x))-0.1
+                    axes[i][j].set_ylim(y_bottom, y_top)
+                    axes[i][j].grid(True, linestyle=':')
+                    axes[i][j].vlines(x=self.x[0], ymin=0, ymax = 10, color='black', ls='--')
+                    axes[i][j].vlines(x=self.x[-1], ymin=0, ymax = 10, color='black', ls='--')
+                    if(self.time_mode == "period"): 
+                        axes[i][j].set_title("t = %.2f $T_0$"%(t[3*i+j]))
+                    else: 
+                        axes[i][j].set_title("Time Step = %d"%(t[3*i+j]))
+            fig.tight_layout()
+        else: 
+            fig, axes = plt.subplots(1, figsize=(3.2, 3.2))
+            axes.plot(self.x, self.state[t], linewidth=0.9, color='b')
+            axes.plot(self.x, 0.02*self.v(self.x), color='orange')
+            axes.set_xlabel("x (a.u.)")
+            axes.set_ylabel("$|\Psi(x,t)|^2$ (a.u.)")
+            axes.set_xlim(get_lim(self.x))
+            axes.set_ylim(get_lim(self.state[0]))
+            axes.grid(True, linestyle=':')
+            axes.vlines(x=self.x[0], ymin=0, ymax = 10, color='black', ls='--')
+            axes.vlines(x=self.x[-1], ymin=0, ymax = 10, color='black', ls='--')
+        
+        if(save_name is not None and save_figs): 
+            plt.savefig(save_name+'.pdf', 
+                        format='pdf', 
+                        dpi=1200, 
+                        bbox_inches='tight')
+        plt.show()
+        
+    def plot_pdf(self, x_l=-5, x_r=5, save_name=None): 
+        """Plots the probability density function over all time steps."""
+        fig, axes = plt.subplots(1, figsize=(3.2, 3.2))
+        cs = axes.contourf(self.t, self.x, np.transpose(self.state), cmap='hot')
+        axes.plot(self.t, self.x_exp)
+        axes.set_xlabel("t ($T_0$)")
+        axes.set_ylabel("$x$ (a.u.)")
+        axes.set_xlim(self.t[0], self.t[-1])
+        axes.set_ylim(x_l, x_r)
+        
+        norm= mpl.colors.Normalize(vmin=cs.cvalues.min(), vmax=cs.cvalues.max())
+        sm = plt.cm.ScalarMappable(norm=norm, cmap = cs.cmap)
+        sm.set_array([])
+        
+        cbar = fig.colorbar(sm, ticks=cs.levels)
+        cbar.ax.set_ylabel("$|\Psi(x,t)|^2$ (a.u.)")
+        cbar.ax.tick_params(size=0)
+        
+        if(save_name is not None and save_figs): 
+            plt.savefig(save_name+'.pdf', 
+                        format='pdf', 
+                        dpi=1200, 
+                        bbox_inches='tight',
+                        rasterized=True)
+        plt.show()
+        
+
+#%% Clean up. Please run this when memory usage is too high
+if('exp' in locals()): 
+    del exp
+plt.close('all')
+gc.collect()
+
+#%% Question 1 Free Space 
+exp = HamiltonianExperiment(Free_Space())
+exp.set_space_steps(-10,10,1000)
+exp.set_time_steps(15000)
+exp.initialize_state(Gaussian(sigma=0.5, x_0=-5, k_0=5))
+exp.evolve("Matrix Slicing")
+if animate: 
+    exp.animate_wavefunction()
+else: 
+    exp.plot_wavefunction([0, 1000, 4000, 8000, 10000, 14500], 
+                          save_name='free_space_wavefunctions')
+
+#%% Question 1 Timing for N=1000 and N=2000
+exp = HamiltonianExperiment(Free_Space())
+for N in range(1000,3000,1000): 
+    exp.set_space_steps(-10,10,N)
+    exp.set_time_steps(15000)
+    exp.initialize_state(Gaussian(sigma=0.5, x_0=-5, k_0=5))
+    # This is purposely commented out for time purposes.
+    #exp.evolve("Full Matrix Multiplication", time_method=True)
+    exp.evolve("Sparse Matrix Multiplication", time_method=True)
+    exp.evolve("Matrix Slicing", time_method=True)
+
+#%% Question 2 Harmonic Oscillator
+from matplotlib import cm
+exp = HamiltonianExperiment(Harmonic_Oscillator())
+exp.set_space_steps(-10,10,1000)
+exp.set_periods(2)
+exp.initialize_state(Gaussian(sigma=0.5, x_0=-5, k_0=0))
+exp.evolve("Matrix Slicing")
+exp.plot_pdf(x_l=-7, x_r=7, save_name='sho_pdf')
+if animate: 
+    exp.animate_wavefunction()
+else: 
+    exp.plot_wavefunction([0, 0.10, 0.25, 0.40, 0.50, 1.00], 
+                          save_name='sho_wavefunctions')
+# Virial Theorem
+print("Kinetic energy expectation value over 1 period: ", exp.get_T_average())
+print("Potential energy expectation value over 1 period: ", exp.get_V_average())
+
+#%% Question 3 Double-Well Potential a=1, b=4
+exp = HamiltonianExperiment(Double_Well(a=1, b=4))
+exp.set_space_steps(-5,5,500)
+exp.set_periods(4)
+exp.initialize_state(Gaussian(sigma=0.5, x_0=-np.sqrt(2), k_0=0))
+exp.evolve("Matrix Slicing")
+#exp.plot_pdf(x_l=-2.5, x_r=2.5, save_name='double_well_pdf')
+if animate: 
+    exp.animate_wavefunction()
+else: 
+    exp.plot_wavefunction([0.20, 1.00, 1.75, 2.50, 3.40, 3.80], 
+                          save_name='double_well_wavefunctions')
+
+#%% Question 3 Double-Well Potential a=1, b=2
+exp = HamiltonianExperiment(Double_Well(a=1, b=2))
+exp.set_space_steps(-5,5,500)
+exp.set_periods(4)
+exp.initialize_state(Gaussian(sigma=0.5, x_0=-np.sqrt(2), k_0=0))
+exp.evolve("Matrix Slicing")
+#exp.plot_pdf(x_l=-2.5, x_r=2.5, save_name='double_well_pdf_a1_b2')
+if animate: 
+    exp.animate_wavefunction()
+else: 
+    exp.plot_wavefunction([0.20, 1.00, 1.75, 2.50, 3.40, 3.80], 
+                          save_name='double_Well_wavefunctions_a1_b2')
+    
+#%% Question 3 Double-Well Potential a=1, b=8
+exp = HamiltonianExperiment(Double_Well(a=1, b=8))
+exp.set_space_steps(-5,5,500)
+exp.set_periods(4)
+exp.initialize_state(Gaussian(sigma=0.5, x_0=-np.sqrt(2), k_0=0))
+exp.evolve("Matrix Slicing")
+exp.plot_pdf(x_l=-3, x_r=-0.5, save_name='double_well_pdf_a1_b8')
+if animate: 
+    exp.animate_wavefunction()
+else: 
+    exp.plot_wavefunction([0.20, 1.00, 1.75, 2.50, 3.40, 3.80], 
+                          save_name='double_Well_wavefunctions_a1_b8')

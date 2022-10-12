@@ -1,0 +1,1 @@
+Please open AndrewHaymanCode.py - all notes and instructions are at the top. 
